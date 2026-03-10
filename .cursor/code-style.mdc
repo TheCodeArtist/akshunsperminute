@@ -1,0 +1,148 @@
+---
+description: Language, formatting, naming, and error-handling conventions for AkshunsPerMinute (pure-Python desktop app)
+alwaysApply: true
+---
+
+# Code Style
+
+## Language & Runtime
+
+- **Python 3.10+** only — no TypeScript, no web stack.
+- Full type annotations on every function signature (parameters and return type).
+- Use `from __future__ import annotations` at the top of files that use forward references.
+
+---
+
+## File & Module Naming
+
+- Lowercase, underscore-separated filenames: `tracker.py`, `session_store.py`, `hotkey_manager.py`.
+- One logical concern per module — never combine unrelated responsibilities.
+- Canonical module layout (per spec §19):
+
+```
+main.py              Entry point; single-instance check; wires all modules
+tracker.py           Input listener, rolling window, APM engine
+overlay.py           Dear PyGui OBS overlay window
+settings_window.py   Dear PyGui settings window (5 tabs)
+tray.py              pystray tray icon, dynamic icon rendering, context menu
+theme_engine.py      Theme loading, built-in registry, import/export
+session_store.py     SQLite CRUD for sessions and apm_samples
+settings_store.py    JSON read/write for settings.json
+hotkey_manager.py    Global hotkey registration and conflict detection
+logger.py            Rotating log file setup
+models.py            Shared dataclasses / typed models (Session, ApmSample, Theme, Settings)
+```
+
+---
+
+## Formatting
+
+- 4-space indentation (PEP 8).
+- Line length: **100 characters** max.
+- Double quotes for strings (consistent with `black` formatter defaults).
+- `black` + `isort` are the canonical formatters — do not hand-format imports.
+- No trailing whitespace. Files end with a single newline.
+
+---
+
+## Types & Data Models
+
+- Use `dataclass` (preferred for lightweight internal models) or Pydantic for all request/response bodies, config, and data passed between modules.
+- **Never pass raw `dict` between module boundaries** — define a typed model in `models.py`.
+- Shared types live in `models.py`; module-private types may be defined locally.
+- Never use `Any` — use specific types or `object` and narrow with type guards.
+
+```python
+# ✅ correct — typed model crossing module boundary
+from models import ApmSample
+
+def record_sample(sample: ApmSample) -> None: ...
+
+# ❌ wrong — raw dict crossing module boundary
+def record_sample(sample: dict) -> None: ...
+```
+
+---
+
+## Thread Safety
+
+The app runs a single process with four threads (main/GUI, tracker, tray, persistence — see spec §3.1). Follow these rules:
+
+- All cross-thread data exchange uses `queue.Queue` or atomic Python primitives (`threading.Event`, `threading.Lock`).
+- Never share mutable state between threads without a lock or queue.
+- The tracker thread **only enqueues** timestamped events; all reads happen on the main/GUI thread during render.
+- The persistence thread **only writes** — it reads from a queue populated by the main thread.
+- Annotate any shared mutable state with a comment identifying which threads access it and under what synchronisation.
+
+```python
+# ASSUMPTION: this deque is only read on the main thread and written on the tracker thread;
+# collections.deque append/popleft are GIL-atomic for single-element ops so no Lock is needed.
+self._event_window: deque[float] = deque()
+```
+
+---
+
+## Dear PyGui Patterns
+
+- All GUI calls (window creation, widget updates, `dpg.render_dearpygui_frame`) happen on the **main thread only**.
+- Use `dpg.configure_item` / `dpg.set_value` to update widget state from within the render loop; never call these from background threads.
+- Tag IDs are named constants defined at module scope — no magic strings scattered through callback code.
+- Callbacks must be fast (< 1 ms); defer heavy work to a queue consumed on the next frame.
+
+---
+
+## Error Handling
+
+- Service/module functions raise typed project exceptions — never raw `Exception` or `RuntimeError`.
+- Canonical exception types (defined in `models.py` or a dedicated `exceptions.py`):
+  - `StorageError` — SQLite or file I/O failures
+  - `HotkeyConflictError` — hotkey already registered by another app
+  - `CorruptDataError` — settings.json or history.db failed validation
+  - `ThemeValidationError` — imported `.theme` file failed schema check
+- Callers catch typed exceptions and convert them to user-visible messages or log entries; they never silently swallow errors.
+- All unhandled exceptions are caught at the top level in `main.py`, logged with full traceback, and shown to the user as a dialog before the app exits cleanly.
+
+```python
+# ✅ correct — typed exception, caught at call site
+try:
+    session_store.save_sample(sample)
+except StorageError as e:
+    logger.error("Failed to persist APM sample: %s", e)
+```
+
+---
+
+## Logging
+
+- Use the module-level logger: `logger = logging.getLogger(__name__)`.
+- Never use `print()` for diagnostic output — always use the logger.
+- Log levels: `DEBUG` for per-frame / high-frequency events; `INFO` for lifecycle events (session start/end, settings saved); `WARNING` / `ERROR` for recoverable / unrecoverable failures.
+- Full tracebacks are logged with `logger.exception(...)` (not `logger.error(..., exc_info=True)`).
+
+---
+
+## Inline Code Commentary
+
+Good comments explain **what** and — critically — **why**. They are mandatory for anything non-trivial, novel, or easy to misunderstand later.
+
+### When to Comment
+
+- **Non-trivial logic**: APM rolling-window math, idle-detection state machine, lerp animation, key-repeat suppression, chroma-key colour handling.
+- **Thread boundaries**: any point where data crosses threads — document which thread writes, which reads, and how safety is ensured.
+- **Win32 / OS integration**: `RegisterHotKey`, `CreateMutex`, `EnumDisplayMonitors`, `SetProcessDpiAwarenessContext` — explain what the call does and why this particular API was chosen.
+- **Design decisions & trade-offs**: e.g., why `queue.Queue` over a `threading.Event`, why scaled partial-window APM rather than zero during warm-up (spec §4.3).
+- **Contracts & invariants**: preconditions the type system doesn't enforce (e.g., "must only be called from the main thread").
+- **Edge cases & defensive code**: explain the edge case being guarded and why.
+- **`# ASSUMPTION:` markers**: at any decision point where an assumption was made, add a comment describing the assumption, why it was made, and what to revisit.
+
+### When NOT to Comment
+
+- Obvious one-liners (`return result`, `i += 1`, simple assignments).
+- Restating the function/variable name in prose.
+- Narrating imports or boilerplate.
+
+### Style
+
+- `#` comments above or inline for single-line notes.
+- Docstrings (`"""..."""`) on **all public functions and classes** — at minimum a one-liner describing purpose, parameters, and return value.
+- Keep comments concise but complete. A good comment answers "what would confuse me if I read this code six months from now?"

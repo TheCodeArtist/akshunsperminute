@@ -1,0 +1,129 @@
+---
+description: Implementation workflow — when to ask the user for clarification vs. proceed, and how to frame questions
+globs: "**/*"
+alwaysApply: true
+---
+
+# Implementation Workflow
+
+## Project at a Glance
+
+**AkshunsPerMinute** is a single-process Windows desktop utility written in pure Python.
+There is no server, no frontend build step, and no external API. The modules are:
+
+| Module | Responsibility |
+|---|---|
+| `main.py` | Entry point; wires together tracker and the active display mode |
+| `tracker.py` | Global input listener (`pynput`) + rolling 60-second APM calculation |
+| `tray.py` | System-tray display mode (`pystray` + `Pillow`) |
+| `overlay.py` | Always-on-top floating window display mode (`tkinter`) |
+
+The target runtime is **Windows 10/11**, distributed as a standalone `.exe` built with
+PyInstaller. Source can also be run directly with Python 3.10+.
+
+---
+
+## Golden Rule
+
+**Never silently assume.** When something is ambiguous, under-specified, or contradicted
+by newly discovered information, stop and ask before writing code. A wrong assumption
+found at review time costs far more than a clarifying question asked upfront.
+
+---
+
+## When to Stop and Ask
+
+Pause and ask the user when **any** of the following is true:
+
+### Specification gaps
+- A behaviour or edge case is not covered by `README.md` or the rules files.
+- A decision is required about APM calculation semantics (e.g., how to handle bursts,
+  what counts as a "tick" for scroll events) and the README is silent on it.
+
+### Windows / library constraints discovered mid-implementation
+- A `pynput`, `pystray`, or `tkinter` limitation makes the planned approach impossible
+  on Windows (e.g., threading restrictions, DPI awareness, UAC interaction).
+- PyInstaller packaging requires a flag or hook that changes user-visible behaviour.
+
+### Meaningful trade-offs
+- Multiple valid implementations exist and the choice has observable consequences for
+  the user, performance, or future maintainability — e.g.:
+  - How the tracker thread communicates APM to the display thread (queue vs. shared
+    variable vs. callback).
+  - Whether the tray icon is redrawn on every APM tick or on a fixed refresh interval.
+  - How display-mode switching is triggered (tray menu item, hotkey, CLI flag).
+
+### Scope uncertainty
+- It is unclear whether a feature (e.g., persisting settings, logging history) is
+  inside or outside the current task.
+- A change would touch the PyInstaller spec or build pipeline unexpectedly.
+
+---
+
+## When to Proceed Without Asking
+
+Do **not** ask when:
+
+- The answer is already stated in `README.md` or a rules file — re-read those first.
+- The decision is cosmetic or low-stakes and trivially reversible (variable name,
+  minor layout tweak, comment wording).
+- The question is answered by a well-established Python / `pynput` / `tkinter` default
+  (e.g., `pynput` listener runs in its own daemon thread by default).
+- You can make a safe default, document it clearly with a `# ASSUMPTION:` comment,
+  and no user-visible behaviour changes.
+
+---
+
+## How to Ask
+
+### Batch questions — one round trip only
+Collect **all** open questions before interrupting the user. Present them together in a
+single message. Never ask one question, wait for an answer, then surface another.
+
+### Be specific
+- Reference the relevant module and the exact decision point.
+- Bad: "How should errors be handled?"
+- Good: "`tracker.py` calls `pynput.keyboard.Listener` which raises `OSError` if it
+  cannot install the Windows hook (e.g., no accessibility permissions). Should we (a)
+  show a user-facing error dialog and exit gracefully, or (b) log to stderr and continue
+  with keyboard tracking disabled?"
+
+### Propose a default
+Always suggest a concrete default option so the user can approve with a single word
+("yes" / "go with (a)") rather than composing an answer from scratch.
+
+### Surface newly discovered constraints
+If mid-implementation you discover that a library or Windows behaviour makes the planned
+approach harder or impossible, describe what you found and propose an alternative before
+continuing.
+
+---
+
+## Handling Assumptions You Must Make
+
+If you are blocked on a minor point and making a reasonable assumption is the fastest
+path forward, you **must**:
+
+1. State the assumption explicitly in your response to the user.
+2. Add a `# ASSUMPTION:` comment in the code at the point where the assumption applies,
+   describing what was assumed and why.
+3. Add a follow-up note at the end of your response flagging it for review.
+
+```python
+# ASSUMPTION: scroll wheel events use delta units from pynput (each notch = ±1 on
+# Windows). If the user's mouse reports fractional deltas, each non-zero event is
+# still counted as exactly 1 akshun. Revisit if high-resolution scroll wheels cause
+# double-counting.
+def on_scroll(x, y, dx, dy):
+    tracker.record()
+```
+
+---
+
+## Threading Model — Key Constraint
+
+`pynput` listeners run in a background thread. `tkinter` **must** only be updated from
+the main thread (or via `root.after()`). `pystray` also runs its own thread. Always use
+thread-safe communication (e.g., `threading.Event`, `queue.Queue`, or `root.after()`)
+between the tracker and the display layer. Never touch a Tk widget directly from the
+`pynput` callback thread.
