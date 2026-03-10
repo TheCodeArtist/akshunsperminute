@@ -1,0 +1,15 @@
+# Enforce LF line endings for all text files in this repo,
+# regardless of core.autocrlf setting.
+* text=auto eol=lf
+
+# Explicitly mark binary files so git never touches their line endings.
+*.exe binary
+*.dll binary
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.pyc binary
